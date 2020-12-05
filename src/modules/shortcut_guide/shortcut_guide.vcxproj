@@ -100,21 +100,27 @@
     <ClCompile>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <MultiProcessorCompilation Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</MultiProcessorCompilation>
-      <MultiProcessorCompilation Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</MultiProcessorCompilation>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="d2d_svg.h" />
+    <ClInclude Include="d2d_text.h" />
+    <ClInclude Include="d2d_window.h" />
     <ClInclude Include="overlay_window.h" />
     <ClInclude Include="keyboard_state.h" />
     <ClInclude Include="Generated Files/resource.h" />
     <None Include="resource.base.h" />
+    <ClInclude Include="ShortcutGuideConstants.h" />
     <ClInclude Include="shortcut_guide.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="target_state.h" />
     <ClInclude Include="trace.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="d2d_svg.cpp" />
+    <ClCompile Include="d2d_text.cpp" />
+    <ClCompile Include="d2d_window.cpp" />
     <ClCompile Include="overlay_window.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="keyboard_state.cpp" />
@@ -129,6 +135,9 @@
     <ProjectReference Include="..\..\common\common.vcxproj">
       <Project>{74485049-c722-400f-abe5-86ac52d929b3}</Project>
     </ProjectReference>
+    <ProjectReference Include="..\..\common\logger\logger.vcxproj">
+      <Project>{d9b8fc84-322a-4f9f-bbb9-20915c47ddfd}</Project>
+    </ProjectReference>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Generated Files/shortcut_guide.rc" />
@@ -141,6 +150,7 @@
     <None Include="Resources.resx" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="..\..\..\deps\spdlog.props" />
   <ImportGroup Label="ExtensionTargets">
     <Import Project="..\..\..\packages\Microsoft.Windows.CppWinRT.2.0.200729.8\build\native\Microsoft.Windows.CppWinRT.targets" Condition="Exists('..\..\..\packages\Microsoft.Windows.CppWinRT.2.0.200729.8\build\native\Microsoft.Windows.CppWinRT.targets')" />
   </ImportGroup>

@@ -12,10 +12,14 @@
 #include "common/common.h"
 #include "restart_elevated.h"
 #include "update_utils.h"
+#include "centralized_kb_hook.h"
 
 #include <common/json.h>
 #include <common\settings_helpers.cpp>
 #include <common/os-detect.h>
+#include <common/version.h>
+#include <common/VersionHelper.h>
+#include <common/logger/logger.h>
 
 #define BUFSIZE 1024
 
@@ -48,8 +52,9 @@ json::JsonObject get_all_settings()
     return result;
 }
 
-void dispatch_json_action_to_module(const json::JsonObject& powertoys_configs)
+std::optional<std::wstring> dispatch_json_action_to_module(const json::JsonObject& powertoys_configs)
 {
+    std::optional<std::wstring> result;
     for (const auto& powertoy_element : powertoys_configs)
     {
         const std::wstring name{ powertoy_element.Key().c_str() };
@@ -76,9 +81,15 @@ void dispatch_json_action_to_module(const json::JsonObject& powertoys_configs)
                 }
                 else if (action == L"check_for_updates")
                 {
-                    std::thread{ [] {
-                        check_for_updates();
-                    } }.detach();
+                    std::wstring latestVersion = check_for_updates();
+                    VersionHelper current_version(VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION);
+                    bool isRunningLatest = latestVersion.compare(current_version.toWstring()) == 0;
+
+                    json::JsonObject json;
+                    json.SetNamedValue(L"version", json::JsonValue::CreateStringValue(latestVersion));
+                    json.SetNamedValue(L"isVersionLatest", json::JsonValue::CreateBooleanValue(isRunningLatest));
+
+                    result.emplace(json.Stringify());
                 }
             }
             catch (...)
@@ -91,13 +102,17 @@ void dispatch_json_action_to_module(const json::JsonObject& powertoys_configs)
             modules().at(name)->call_custom_action(element.c_str());
         }
     }
+
+    return result;
 }
 
 void send_json_config_to_module(const std::wstring& module_key, const std::wstring& settings)
 {
-    if (modules().find(module_key) != modules().end())
+    auto moduleIt = modules().find(module_key);
+    if (moduleIt != modules().end())
     {
-        modules().at(module_key)->set_config(settings.c_str());
+        moduleIt->second->set_config(settings.c_str());
+        moduleIt->second.update_hotkeys();
     }
 }
 
@@ -146,7 +161,11 @@ void dispatch_received_json(const std::wstring& json_to_parse)
         }
         else if (name == L"action")
         {
-            dispatch_json_action_to_module(value.GetObjectW());
+            auto result = dispatch_json_action_to_module(value.GetObjectW());
+            if (result.has_value())
+            {
+                current_settings_ipc->send(result.value());
+            }
         }
     }
     return;
@@ -226,7 +245,6 @@ BOOL run_settings_non_elevated(LPCWSTR executable_path, LPWSTR executable_args, 
     return process_created;
 }
 
-
 DWORD g_settings_process_id = 0;
 
 void run_settings_window()
@@ -259,9 +277,18 @@ void run_settings_window()
     std::wstring powertoys_pipe_name(L"\\\\.\\pipe\\powertoys_runner_");
     std::wstring settings_pipe_name(L"\\\\.\\pipe\\powertoys_settings_");
     UUID temp_uuid;
-    UuidCreate(&temp_uuid);
-    wchar_t* uuid_chars;
-    UuidToString(&temp_uuid, (RPC_WSTR*)&uuid_chars);
+    wchar_t* uuid_chars = nullptr;
+    if (UuidCreate(&temp_uuid) == RPC_S_UUID_NO_ADDRESS)
+    {
+        auto val = get_last_error_message(GetLastError());
+        Logger::warn(L"UuidCreate can not create guid. {}", val.has_value() ? val.value() : L"");
+    }
+    else if (UuidToString(&temp_uuid, (RPC_WSTR*)&uuid_chars) != RPC_S_OK)
+    {
+        auto val = get_last_error_message(GetLastError());
+        Logger::warn(L"UuidToString can not convert to string. {}", val.has_value() ? val.value() : L"");
+    }
+
     if (uuid_chars != nullptr)
     {
         powertoys_pipe_name += std::wstring(uuid_chars);
@@ -309,7 +336,7 @@ void run_settings_window()
         settings_isUserAnAdmin = L"false";
     }
 
-    // create general settings file to initialze the settings file with installation configurations like :
+    // create general settings file to initialize the settings file with installation configurations like :
     // 1. Run on start up.
     PTSettingsHelper::save_general_settings(save_settings.to_json());
 
@@ -369,10 +396,18 @@ void run_settings_window()
     current_settings_ipc->start(hToken);
     g_settings_process_id = process_info.dwProcessId;
 
-    WaitForSingleObject(process_info.hProcess, INFINITE);
-    if (WaitForSingleObject(process_info.hProcess, INFINITE) != WAIT_OBJECT_0)
+    if (process_info.hProcess)
     {
-        show_last_error_message(L"Couldn't wait on the Settings Window to close.", GetLastError());
+        WaitForSingleObject(process_info.hProcess, INFINITE);
+        if (WaitForSingleObject(process_info.hProcess, INFINITE) != WAIT_OBJECT_0)
+        {
+            show_last_error_message(L"Couldn't wait on the Settings Window to close.", GetLastError(), L"PowerToys - runner");
+        }
+    }
+    else
+    {
+        auto val = get_last_error_message(GetLastError());
+        Logger::error(L"Process handle is empty. {}", val.has_value() ? val.value() : L"");
     }
 
 LExit:

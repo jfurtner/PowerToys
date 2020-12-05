@@ -9,6 +9,8 @@
 #include <sstream>
 #include <complex>
 
+#include <fancyzones/lib/FancyZonesDataTypes.h>
+
 // Non-Localizable strings
 namespace NonLocalizable
 {
@@ -18,26 +20,6 @@ namespace NonLocalizable
 
 namespace
 {
-    bool HasNoVisibleOwner(HWND window) noexcept
-    {
-        auto owner = GetWindow(window, GW_OWNER);
-        if (owner == nullptr)
-        {
-            return true; // There is no owner at all
-        }
-        if (!IsWindowVisible(owner))
-        {
-            return true; // Owner is invisible
-        }
-        RECT rect;
-        if (!GetWindowRect(owner, &rect))
-        {
-            return false; // Could not get the rect, return true (and filter out the window) just in case
-        }
-        // It is enough that the window is zero-sized in one dimension only.
-        return rect.top == rect.bottom || rect.left == rect.right;
-    }
-
     bool IsZonableByProcessPath(const std::wstring& processPath, const std::vector<std::wstring>& excludedApps)
     {
         // Filter out user specified apps
@@ -60,6 +42,118 @@ namespace
 
 namespace FancyZonesUtils
 {
+    std::wstring TrimDeviceId(const std::wstring& deviceId)
+    {
+        // We're interested in the unique part between the first and last #'s
+        // Example input: \\?\DISPLAY#DELA026#5&10a58c63&0&UID16777488#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}
+        // Example output: DELA026#5&10a58c63&0&UID16777488
+        static const std::wstring defaultDeviceId = L"FallbackDevice";
+        if (deviceId.empty())
+        {
+            return defaultDeviceId;
+        }
+
+        size_t start = deviceId.find(L'#');
+        size_t end = deviceId.rfind(L'#');
+        if (start != std::wstring::npos && end != std::wstring::npos && start != end)
+        {
+            size_t size = end - (start + 1);
+            return deviceId.substr(start + 1, size);
+        }
+        else
+        {
+            return defaultDeviceId;
+        }
+    }
+    
+    std::optional<FancyZonesDataTypes::DeviceIdData> ParseDeviceId(const std::wstring& str)
+    {
+        FancyZonesDataTypes::DeviceIdData data;
+
+        std::wstring temp;
+        std::wstringstream wss(str);
+
+        /*
+        Important fix for device info that contains a '_' in the name:
+        1. first search for '#'
+        2. Then split the remaining string by '_'
+        */
+
+        // Step 1: parse the name until the #, then to the '_'
+        if (str.find(L'#') != std::string::npos)
+        {
+            std::getline(wss, temp, L'#');
+
+            data.deviceName = temp;
+
+            if (!std::getline(wss, temp, L'_'))
+            {
+                return std::nullopt;
+            }
+
+            data.deviceName += L"#" + temp;
+        }
+        else if(std::getline(wss, temp, L'_') && !temp.empty())
+        {
+            data.deviceName = temp;
+        }
+        else
+        {
+            return std::nullopt;
+        }
+
+        // Step 2: parse the rest of the id
+        std::vector<std::wstring> parts;
+        while (std::getline(wss, temp, L'_'))
+        {
+            parts.push_back(temp);
+        }
+
+        if (parts.size() != 3 && parts.size() != 4)
+        {
+            return std::nullopt;
+        }
+
+        /*
+        Refer to ZoneWindowUtils::GenerateUniqueId parts contain:
+        1. monitor id [string]
+        2. width of device [int]
+        3. height of device [int]
+        4. virtual desktop id (GUID) [string]
+        */
+        try
+        {
+            for (const auto& c : parts[0])
+            {
+                std::stoi(std::wstring(&c));
+            }
+
+            for (const auto& c : parts[1])
+            {
+                std::stoi(std::wstring(&c));
+            }
+
+            data.width = std::stoi(parts[0]);
+            data.height = std::stoi(parts[1]);
+        }
+        catch (const std::exception&)
+        {
+            return std::nullopt;
+        }
+
+        if (!SUCCEEDED(CLSIDFromString(parts[2].c_str(), &data.virtualDesktopId)))
+        {
+            return std::nullopt;
+        }
+
+        if (parts.size() == 4)
+        {
+            data.monitorId = parts[3]; //could be empty
+        }
+
+        return data;
+    }
+    
     typedef BOOL(WINAPI* GetDpiForMonitorInternalFunc)(HMONITOR, UINT, UINT*, UINT*);
     UINT GetDpiForMonitor(HMONITOR monitor) noexcept
     {
@@ -201,12 +295,31 @@ namespace FancyZonesUtils
         ::SetWindowPlacement(window, &placement);
     }
 
-    FancyZonesWindowInfo GetFancyZonesWindowInfo(HWND window)
+    bool HasNoVisibleOwner(HWND window) noexcept
     {
-        FancyZonesWindowInfo result;
+        auto owner = GetWindow(window, GW_OWNER);
+        if (owner == nullptr)
+        {
+            return true; // There is no owner at all
+        }
+        if (!IsWindowVisible(owner))
+        {
+            return true; // Owner is invisible
+        }
+        RECT rect;
+        if (!GetWindowRect(owner, &rect))
+        {
+            return false; // Could not get the rect, return true (and filter out the window) just in case
+        }
+        // It is enough that the window is zero-sized in one dimension only.
+        return rect.top == rect.bottom || rect.left == rect.right;
+    }
+
+    bool IsStandardWindow(HWND window)
+    {
         if (GetAncestor(window, GA_ROOT) != window || !IsWindowVisible(window))
         {
-            return result;
+            return false;
         }
         auto style = GetWindowLong(window, GWL_STYLE);
         auto exStyle = GetWindowLong(window, GWL_EXSTYLE);
@@ -217,56 +330,51 @@ namespace FancyZonesUtils
             (style & WS_MINIMIZEBOX) == 0 &&
             (style & WS_MAXIMIZEBOX) == 0)
         {
-            return result;
+            return false;
         }
         if ((style & WS_CHILD) == WS_CHILD ||
             (style & WS_DISABLED) == WS_DISABLED ||
             (exStyle & WS_EX_TOOLWINDOW) == WS_EX_TOOLWINDOW ||
             (exStyle & WS_EX_NOACTIVATE) == WS_EX_NOACTIVATE)
         {
-            return result;
+            return false;
         }
         std::array<char, 256> class_name;
         GetClassNameA(window, class_name.data(), static_cast<int>(class_name.size()));
         if (is_system_window(window, class_name.data()))
         {
-            return result;
+            return false;
         }
         auto process_path = get_process_path(window);
         // Check for Cortana:
         if (strcmp(class_name.data(), "Windows.UI.Core.CoreWindow") == 0 &&
             process_path.ends_with(L"SearchUI.exe"))
         {
-            return result;
+            return false;
         }
-        result.processPath = std::move(process_path);
-        result.standardWindow = true;
-        result.noVisibleOwner = HasNoVisibleOwner(window);
-        return result;
+
+        return true;
     }
 
     bool IsCandidateForLastKnownZone(HWND window, const std::vector<std::wstring>& excludedApps) noexcept
     {
-        auto windowInfo = GetFancyZonesWindowInfo(window);
-        auto zonable = windowInfo.standardWindow && windowInfo.noVisibleOwner;
+        auto zonable = IsStandardWindow(window) && HasNoVisibleOwner(window);
         if (!zonable)
         {
             return false;
         }
 
-        return IsZonableByProcessPath(windowInfo.processPath, excludedApps);
+        return IsZonableByProcessPath(get_process_path(window), excludedApps);
     }
 
     bool IsCandidateForZoning(HWND window, const std::vector<std::wstring>& excludedApps) noexcept
     {
-        auto windowInfo = GetFancyZonesWindowInfo(window);
-
-        if (!windowInfo.standardWindow)
+        if (!IsStandardWindow(window))
         {
             return false;
         }
 
-        return IsZonableByProcessPath(windowInfo.processPath, excludedApps);
+        return IsZonableByProcessPath(get_process_path(window), excludedApps);
     }
 
     bool IsWindowMaximized(HWND window) noexcept
@@ -437,6 +545,71 @@ namespace FancyZonesUtils
         }
 
         return true;
+    }
+
+    std::wstring GenerateUniqueId(HMONITOR monitor, const std::wstring& deviceId, const std::wstring& virtualDesktopId)
+    {
+        MONITORINFOEXW mi;
+        mi.cbSize = sizeof(mi);
+        if (!virtualDesktopId.empty() && GetMonitorInfo(monitor, &mi))
+        {
+            Rect const monitorRect(mi.rcMonitor);
+            // Unique identifier format: <parsed-device-id>_<width>_<height>_<virtual-desktop-id>
+            return TrimDeviceId(deviceId) +
+                   L'_' +
+                   std::to_wstring(monitorRect.width()) +
+                   L'_' +
+                   std::to_wstring(monitorRect.height()) +
+                   L'_' +
+                   virtualDesktopId;
+        }
+        return {};
+    }
+
+    std::wstring GenerateUniqueIdAllMonitorsArea(const std::wstring& virtualDesktopId)
+    {
+        std::wstring result{ ZonedWindowProperties::MultiMonitorDeviceID };
+
+        RECT combinedResolution = GetAllMonitorsCombinedRect<&MONITORINFO::rcMonitor>();
+
+        result += L'_';
+        result += std::to_wstring(combinedResolution.right - combinedResolution.left);
+        result += L'_';
+        result += std::to_wstring(combinedResolution.bottom - combinedResolution.top);
+        result += L'_';
+        result += virtualDesktopId;
+
+        return result;
+    }
+
+    std::optional<std::wstring> GenerateMonitorId(MONITORINFOEX mi, HMONITOR monitor, const GUID& virtualDesktopId)
+    {
+        DISPLAY_DEVICE displayDevice = { sizeof(displayDevice) };
+        PCWSTR deviceId = nullptr;
+
+        bool validMonitor = true;
+        if (EnumDisplayDevices(mi.szDevice, 0, &displayDevice, 1))
+        {
+            if (displayDevice.DeviceID[0] != L'\0')
+            {
+                deviceId = displayDevice.DeviceID;
+            }
+        }
+
+        if (!deviceId)
+        {
+            deviceId = GetSystemMetrics(SM_REMOTESESSION) ?
+                           L"\\\\?\\DISPLAY#REMOTEDISPLAY#" :
+                           L"\\\\?\\DISPLAY#LOCALDISPLAY#";
+        }
+
+        wil::unique_cotaskmem_string vdId;
+        if (SUCCEEDED(StringFromCLSID(virtualDesktopId, &vdId)))
+        {
+            return GenerateUniqueId(monitor, deviceId, vdId.get());
+        }
+
+        return std::nullopt;
     }
 
     size_t ChooseNextZoneByPosition(DWORD vkCode, RECT windowRect, const std::vector<RECT>& zoneRects) noexcept
